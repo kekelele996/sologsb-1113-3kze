@@ -68,7 +68,7 @@ export default function OverviewPage() {
           endMinute,
           label: `${target?.name ?? '未知目标'} · ${telescopeById(session.telescopeId)?.code ?? '-'}`,
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
-          dimmed: session.status === '因云取消' || Boolean(altitude?.below),
+          dimmed: session.status === '因云取消' || session.status === '待改期' || Boolean(altitude?.below),
           tooltip: `${session.startTime}-${session.endTime} ${target?.name ?? ''}｜${telescopeById(session.telescopeId)?.code ?? '-'} / ${
             instrumentById(session.instrumentId)?.model ?? '-'
           }｜${session.filterSlot}｜${session.plannedFrames} 帧｜${session.status}｜评估高度角 ${altitude?.altitude ?? '-'}°`,

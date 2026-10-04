@@ -1,6 +1,9 @@
 import Dexie, { type Table } from 'dexie';
 import { useEffect, useState } from 'react';
-import type { Instrument, ObsNight, ObsSession, ObsTarget, Telescope } from '../types';
+import type { ForecastReview, HourlyForecast, Instrument, ObsNight, ObsSession, ObsTarget, Telescope } from '../types';
+import { NIGHT_HOURS, forecastId } from '../types';
+import { buildLegacyBackfill, splitLegacyCloudText } from '../utils/forecast';
+import { uid } from '../utils/id';
 
 /** IndexedDB 库名（浏览器本地存储，无后端） */
 export const DB_NAME = 'gbobsplan-db';
@@ -14,6 +17,8 @@ class ObsPlanDB extends Dexie {
   telescopes!: Table<Telescope, string>;
   instruments!: Table<Instrument, string>;
   nights!: Table<ObsNight, string>;
+  forecasts!: Table<HourlyForecast, string>;
+  forecastReviews!: Table<ForecastReview, string>;
   meta!: Table<{ key: string; value: string }, string>;
 
   constructor() {
@@ -55,12 +60,55 @@ class ObsPlanDB extends Dexie {
             }
           });
       });
+
+    // v3：新增分时预报表（按站点 + 日期 + 小时分开存）与升级待确认表；
+    // 旧数据只有整夜云量文字，升级时按它回填一整夜的分时预报并保留原文对照，
+    // 拆不出小时的（非标准云量等级）列入 forecastReviews 交人认
+    this.version(3)
+      .stores({
+        targets: 'id, name, catalog, type, priority, magnitude',
+        sessions: 'id, nightId, targetId, telescopeId, instrumentId, startTime, status, backupNightId',
+        telescopes: 'id, code, status',
+        instruments: 'id, model, telescopeCode, terminalType',
+        nights: 'id, date, siteName, primary, backup',
+        forecasts: 'id, siteName, date, hour, [siteName+date]',
+        forecastReviews: 'id, nightId',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        const nights = (await tx.table('nights').toArray()) as ObsNight[];
+        const updatedAt = new Date().toISOString();
+        const rows: HourlyForecast[] = [];
+        const reviews: ForecastReview[] = [];
+        nights.forEach((night) => {
+          const cloud = splitLegacyCloudText(night.cloudText);
+          if (cloud) {
+            rows.push(...buildLegacyBackfill(night, cloud, updatedAt));
+          } else {
+            reviews.push({
+              id: uid('fr'),
+              nightId: night.id,
+              date: night.date,
+              siteName: night.siteName,
+              legacyText: night.cloudText ?? '',
+              reason: '整夜云量文字无法拆分为逐小时预报，请人工认定云量等级',
+            });
+          }
+        });
+        if (rows.length > 0) await tx.table('forecasts').bulkPut(rows);
+        if (reviews.length > 0) await tx.table('forecastReviews').bulkPut(reviews);
+        // 已回填的观测夜视为分时预报发布完整
+        const published = nights
+          .filter((night) => splitLegacyCloudText(night.cloudText))
+          .map((night) => ({ key: `forecast-published:${night.siteName}:${night.date}`, value: String(NIGHT_HOURS.length) }));
+        if (published.length > 0) await tx.table('meta').bulkPut(published);
+      });
   }
 }
 
 export const db = new ObsPlanDB();
 
-export type TableName = 'targets' | 'sessions' | 'telescopes' | 'instruments' | 'nights';
+export type TableName = 'targets' | 'sessions' | 'telescopes' | 'instruments' | 'nights' | 'forecasts' | 'forecastReviews';
 
 /** 写入单条记录（Dexie 读写封装，store 的增删改统一走这里） */
 export async function persistRow(table: TableName, row: unknown): Promise<void> {
@@ -134,16 +182,42 @@ const SEED_SESSIONS: ObsSession[] = [
   { id: 's-14', nightId: 'night-002', targetId: 'target-001', startTime: '02:10', endTime: '03:10', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
 ];
 
+/** 示例分时预报的逐小时云量覆盖（未列出的小时用观测夜整夜云量） */
+const SEED_FORECAST_CLOUDS: Record<string, Record<string, string>> = {
+  // night-002 的 21、22 时转阴，与 s-11 因云取消的改期记录呼应
+  'night-002': { '21:00': '阴', '22:00': '阴' },
+};
+
+/** 示例分时预报的已发布小时数（night-001 只发布前 9 小时，演示未覆盖挂起、补齐后恢复） */
+const SEED_FORECAST_PUBLISHED: Record<string, number> = {
+  'night-001': 9,
+};
+
+const SEED_FORECASTS: HourlyForecast[] = SEED_NIGHTS.flatMap((night) => {
+  const published = SEED_FORECAST_PUBLISHED[night.id] ?? NIGHT_HOURS.length;
+  return NIGHT_HOURS.slice(0, published).map((hour) => ({
+    id: forecastId(night.siteName, night.date, hour),
+    siteName: night.siteName,
+    date: night.date,
+    hour,
+    cloud: SEED_FORECAST_CLOUDS[night.id]?.[hour] ?? night.cloudText,
+    source: 'fetch' as const,
+    batchId: 'seed',
+    updatedAt: '2025-10-10T12:00:00.000Z',
+  }));
+});
+
 /** 首次打开（表内无数据）时写入示例数据 */
 export async function seedIfEmpty(): Promise<void> {
   const flag = await db.meta.get('seeded');
   if (flag) return;
-  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount] = await Promise.all([
+  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount, forecastCount] = await Promise.all([
     db.targets.count(),
     db.sessions.count(),
     db.telescopes.count(),
     db.instruments.count(),
     db.nights.count(),
+    db.forecasts.count(),
   ]);
   // Dexie 的 transaction 最多接受 5 张表 + 作用域，因此 meta 标记在事务外写入
   await db.transaction('rw', db.targets, db.sessions, db.telescopes, db.instruments, db.nights, async () => {
@@ -153,22 +227,32 @@ export async function seedIfEmpty(): Promise<void> {
     if (instrumentCount === 0) await db.instruments.bulkPut(SEED_INSTRUMENTS);
     if (sessionCount === 0) await db.sessions.bulkPut(SEED_SESSIONS);
   });
-  await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
+  // 分时预报单独一个事务（依赖观测夜的站点与日期）
+  if (forecastCount === 0) await db.forecasts.bulkPut(SEED_FORECASTS);
+  await db.meta.bulkPut([
+    { key: 'seeded', value: new Date().toISOString() },
+    ...SEED_NIGHTS.map((night) => ({
+      key: `forecast-published:${night.siteName}:${night.date}`,
+      value: String(SEED_FORECAST_PUBLISHED[night.id] ?? NIGHT_HOURS.length),
+    })),
+  ]);
 }
 
 /** 把 Dexie 数据同步到各 Zustand store（动态 import 规避模块循环依赖） */
 export async function hydrateAllStores(): Promise<void> {
-  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }] = await Promise.all([
+  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }, { useForecastStore }] = await Promise.all([
     import('../stores/targetStore'),
     import('../stores/sessionStore'),
     import('../stores/equipmentStore'),
     import('../stores/nightStore'),
+    import('../stores/forecastStore'),
   ]);
   await Promise.all([
     useTargetStore.getState().hydrate(),
     useSessionStore.getState().hydrate(),
     useEquipmentStore.getState().hydrate(),
     useNightStore.getState().hydrate(),
+    useForecastStore.getState().hydrate(),
   ]);
 }
 

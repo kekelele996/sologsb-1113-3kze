@@ -4,6 +4,7 @@ import App from '../App';
 import OverviewPage from '../pages/OverviewPage';
 import TargetsPage from '../pages/TargetsPage';
 import SessionsPage from '../pages/SessionsPage';
+import WeatherPage from '../pages/WeatherPage';
 import EquipmentPage from '../pages/EquipmentPage';
 import ExportPage from '../pages/ExportPage';
 
@@ -23,7 +24,7 @@ function NotFound() {
   );
 }
 
-/** 全部路由：编排总览 + 目标库 / 排程段 / 设备分配 / 导出 */
+/** 全部路由：编排总览 + 目标库 / 排程段 / 气象对账 / 设备分配 / 导出 */
 export const routes: RouteObject[] = [
   {
     path: '/',
@@ -32,6 +33,7 @@ export const routes: RouteObject[] = [
       { index: true, element: <OverviewPage /> },
       { path: 'targets', element: <TargetsPage /> },
       { path: 'sessions', element: <SessionsPage /> },
+      { path: 'weather', element: <WeatherPage /> },
       { path: 'equipment', element: <EquipmentPage /> },
       { path: 'export', element: <ExportPage /> },
       { path: '*', element: <NotFound /> },

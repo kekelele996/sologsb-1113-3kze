@@ -60,7 +60,7 @@ export default function ExportPage() {
           endMinute: Math.max(startMinute + 20, Math.min(NIGHT_TOTAL_MINUTES, rawEnd <= startMinute ? rawEnd + 1440 : rawEnd)),
           label: target?.name ?? '未知目标',
           color: target ? TARGET_COLOR[target.type] : '#607d8b',
-          dimmed: session.status === '因云取消',
+          dimmed: session.status === '因云取消' || session.status === '待改期',
           tooltip: `${session.startTime}-${session.endTime} · ${session.filterSlot} · ${session.plannedFrames} 帧 · ${session.status}`,
         };
       }),

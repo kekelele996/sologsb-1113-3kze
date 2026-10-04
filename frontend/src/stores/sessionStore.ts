@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { db, deleteRow, persistRow, SCHEMA_VERSION } from '../hooks/usePersistentStore';
 import { uid } from '../utils/id';
-import type { ObsSession, SessionStatus } from '../types';
+import type { DeferralPlan, ObsSession, ReconcileAction, SessionStatus } from '../types';
 
 export interface SessionInput {
   nightId: string;
@@ -27,6 +27,10 @@ interface SessionState {
   /** 批量改期到备用观测夜并填写改期原因 */
   rescheduleToBackup: (ids: string[], backupNightId: string, reason: string) => Promise<number>;
   updateStatus: (id: string, status: SessionStatus) => Promise<void>;
+  /** 应用按小时对账结果：只改动列出的段，编排台已确认 / 已改好的段不在其列 */
+  applyReconcile: (actions: ReconcileAction[]) => Promise<number>;
+  /** 应用顺延方案：待改期的段顺延到晴好钟点并恢复待执行 */
+  applyDeferrals: (plans: DeferralPlan[]) => Promise<number>;
 }
 
 /** 排程段与冲突检测所需数据 */
@@ -91,5 +95,47 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
   updateStatus: async (id, status) => {
     await get().updateSession(id, { status });
+  },
+
+  applyReconcile: async (actions) => {
+    const updated = actions
+      .map((action): ObsSession | null => {
+        const session = get().sessions.find((item) => item.id === action.sessionId);
+        if (!session) return null;
+        return {
+          ...session,
+          status: action.nextStatus,
+          rescheduleReason: action.reason.trim() || undefined,
+          schemaVersion: SCHEMA_VERSION,
+        };
+      })
+      .filter((item): item is ObsSession => item !== null);
+    for (const session of updated) {
+      await persistRow('sessions', session);
+    }
+    set({ sessions: get().sessions.map((session) => updated.find((item) => item.id === session.id) ?? session) });
+    return updated.length;
+  },
+
+  applyDeferrals: async (plans) => {
+    const updated = plans
+      .map((plan): ObsSession | null => {
+        const session = get().sessions.find((item) => item.id === plan.sessionId);
+        if (!session) return null;
+        return {
+          ...session,
+          startTime: plan.toStart,
+          endTime: plan.toEnd,
+          status: '待执行' as SessionStatus,
+          rescheduleReason: `已顺延至 ${plan.toStart}-${plan.toEnd}（原 ${plan.fromStart} 起退回待改期）`,
+          schemaVersion: SCHEMA_VERSION,
+        };
+      })
+      .filter((item): item is ObsSession => item !== null);
+    for (const session of updated) {
+      await persistRow('sessions', session);
+    }
+    set({ sessions: get().sessions.map((session) => updated.find((item) => item.id === session.id) ?? session) });
+    return updated.length;
   },
 }));
