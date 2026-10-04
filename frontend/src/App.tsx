@@ -27,6 +27,7 @@ const NAV_ITEMS = [
   { path: '/targets', label: '观测目标库' },
   { path: '/sessions', label: '排程段与冲突' },
   { path: '/equipment', label: '设备分配视图' },
+  { path: '/weather', label: '气象预报对账' },
   { path: '/export', label: '导出观测清单' },
 ];
 

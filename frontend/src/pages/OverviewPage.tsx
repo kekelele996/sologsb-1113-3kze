@@ -5,6 +5,7 @@ import Box from '@mui/material/Box';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import MenuItem from '@mui/material/MenuItem';
+import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -18,8 +19,10 @@ import { useNightStore } from '../stores/nightStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useTargetStore } from '../stores/targetStore';
 import { useEquipmentStore } from '../stores/equipmentStore';
-import { NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
+import { useWeatherStore } from '../stores/weatherStore';
+import { CONDITION_COLOR, NIGHT_HOURS, NIGHT_TOTAL_MINUTES, TARGET_COLOR } from '../types';
 import { altitudeAt, axisMinutes, isBelowThreshold, minutesToTime, moonBrightnessFactor, moonConflict, moonPhaseText, timelineTicks } from '../utils/astro';
+import { hourToAxis } from '../utils/weather';
 
 /** 本夜编排总览：30 分钟刻度时间轴 + 月相与月出月落条带 + 冲突与标灰提示 */
 export default function OverviewPage() {
@@ -32,11 +35,24 @@ export default function OverviewPage() {
   const telescopes = useEquipmentStore((s) => s.telescopes);
   const instruments = useEquipmentStore((s) => s.instruments);
   const { conflictIds, conflictsOfNight } = useConflictCheck();
+  const forecasts = useWeatherStore((s) => s.forecasts);
 
   const night = nights.find((item) => item.id === currentNightId) ?? nights[0];
   const nightSessions = useMemo(() => sessions.filter((session) => session.nightId === night?.id), [sessions, night?.id]);
   const ids = useMemo(() => conflictIds(night?.id), [conflictIds, night?.id]);
   const conflicts = useMemo(() => conflictsOfNight(night?.id ?? ''), [conflictsOfNight, night?.id]);
+
+  /** 分时预报条带（按小时 + 站点） */
+  const forecastStrip = useMemo(() => {
+    if (!night) return [];
+    return NIGHT_HOURS.map((hour) => {
+      const forecast = forecasts.find((item) => item.nightId === night.id && item.siteName === night.siteName && item.hour === hour);
+      return { hour, condition: forecast?.condition };
+    });
+  }, [forecasts, night]);
+
+  const pendingReschedule = nightSessions.filter((session) => session.status === '待改期').length;
+  const suspended = nightSessions.filter((session) => session.status === '已挂起').length;
 
   /** 以夜间 22:00 作为高度角评估时刻 */
   const evaluateDate = useMemo(() => new Date(`${night?.date ?? '2025-10-11'}T22:00:00`), [night?.date]);
@@ -157,7 +173,62 @@ export default function OverviewPage() {
             </Typography>
           </CardContent>
         </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              阴雨退回待改期
+            </Typography>
+            <Typography variant="h5" color={pendingReschedule ? 'warning.main' : 'success.main'}>
+              {pendingReschedule}
+            </Typography>
+          </CardContent>
+        </Card>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="caption" color="text.secondary">
+              预报未覆盖已挂起
+            </Typography>
+            <Typography variant="h5" color={suspended ? 'info.main' : 'success.main'}>
+              {suspended}
+            </Typography>
+          </CardContent>
+        </Card>
       </Box>
+
+      {/* 分时预报条带（按小时 + 站点） */}
+      <Paper variant="outlined" sx={{ p: 1.5, mb: 2 }}>
+        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="subtitle2">分时预报</Typography>
+          <Typography variant="caption" color="text.secondary">
+            （{night?.siteName} · 按小时存储 · 对账见「气象预报对账」页）
+          </Typography>
+        </Stack>
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(12, 1fr)', gap: 0.5 }}>
+          {forecastStrip.map(({ hour, condition }) => (
+            <Box
+              key={hour}
+              sx={{
+                borderRadius: 1,
+                px: 0.5,
+                py: 0.75,
+                textAlign: 'center',
+                bgcolor: condition ? CONDITION_COLOR[condition] : 'action.disabledBackground',
+                color: condition ? '#1c2333' : 'text.disabled',
+                border: '1px solid',
+                borderColor: 'divider',
+              }}
+              title={`${hour}:00${condition ? ` · ${condition}` : ' · 未覆盖'}`}
+            >
+              <Typography variant="caption" sx={{ display: 'block', fontWeight: 600 }}>
+                {hour}时
+              </Typography>
+              <Typography variant="caption" sx={{ display: 'block' }}>
+                {condition ?? '未覆盖'}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+      </Paper>
 
       {conflicts.length > 0 ? (
         <Alert severity="error" sx={{ mb: 2 }}>

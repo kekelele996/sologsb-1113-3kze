@@ -1,12 +1,13 @@
 import Dexie, { type Table } from 'dexie';
 import { useEffect, useState } from 'react';
-import type { Instrument, ObsNight, ObsSession, ObsTarget, Telescope } from '../types';
+import type { HourlyForecast, Instrument, LegacyReview, ObsNight, ObsSession, ObsTarget, Telescope, WeatherFetchBatch } from '../types';
+import { forecastsFromLegacy, parseCloudText, reviewFromLegacy } from '../utils/weather';
 
 /** IndexedDB 库名（浏览器本地存储，无后端） */
 export const DB_NAME = 'gbobsplan-db';
 
 /** 当前数据结构版本，写入每条记录并用于升级迁移判定 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 class ObsPlanDB extends Dexie {
   targets!: Table<ObsTarget, string>;
@@ -14,6 +15,9 @@ class ObsPlanDB extends Dexie {
   telescopes!: Table<Telescope, string>;
   instruments!: Table<Instrument, string>;
   nights!: Table<ObsNight, string>;
+  hourlyForecasts!: Table<HourlyForecast, string>;
+  weatherBatches!: Table<WeatherFetchBatch, string>;
+  legacyReviews!: Table<LegacyReview, string>;
   meta!: Table<{ key: string; value: string }, string>;
 
   constructor() {
@@ -55,12 +59,58 @@ class ObsPlanDB extends Dexie {
             }
           });
       });
+
+    // v3：气象预报按小时 + 站点分开存；旧整夜云量文字回填分时预报并留原文对照，拆不出小时的列出来交人认
+    this.version(3)
+      .stores({
+        targets: 'id, name, catalog, type, priority, magnitude',
+        sessions: 'id, nightId, targetId, telescopeId, instrumentId, startTime, status, backupNightId',
+        telescopes: 'id, code, status',
+        instruments: 'id, model, telescopeCode, terminalType',
+        nights: 'id, date, siteName, primary, backup',
+        hourlyForecasts: 'id, nightId, siteName, hour, condition, source, fetchBatchId',
+        weatherBatches: 'id, nightId, siteName, status',
+        legacyReviews: 'id, nightId, siteName, resolved',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        const nights = (await tx.table('nights').toArray()) as ObsNight[];
+        const now = new Date().toISOString();
+        const forecastRows: HourlyForecast[] = [];
+        const reviewRows: LegacyReview[] = [];
+        for (const night of nights) {
+          const condition = parseCloudText(night.cloudText);
+          if (condition) {
+            forecastRows.push(...forecastsFromLegacy(night.id, night.siteName, night.cloudText, now, SCHEMA_VERSION));
+          } else {
+            const review = reviewFromLegacy(night.id, night.siteName, night.cloudText, SCHEMA_VERSION);
+            if (review) reviewRows.push(review);
+          }
+        }
+        if (forecastRows.length > 0) await tx.table('hourlyForecasts').bulkPut(forecastRows);
+        if (reviewRows.length > 0) await tx.table('legacyReviews').bulkPut(reviewRows);
+        // 统一旧记录的 schemaVersion（v2 升级上来的排程段补齐到当前版本）
+        await tx
+          .table('sessions')
+          .toCollection()
+          .modify((row: ObsSession) => {
+            if (row.schemaVersion !== SCHEMA_VERSION) row.schemaVersion = SCHEMA_VERSION;
+          });
+      });
   }
 }
 
 export const db = new ObsPlanDB();
 
-export type TableName = 'targets' | 'sessions' | 'telescopes' | 'instruments' | 'nights';
+export type TableName =
+  | 'targets'
+  | 'sessions'
+  | 'telescopes'
+  | 'instruments'
+  | 'nights'
+  | 'hourlyForecasts'
+  | 'weatherBatches'
+  | 'legacyReviews';
 
 /** 写入单条记录（Dexie 读写封装，store 的增删改统一走这里） */
 export async function persistRow(table: TableName, row: unknown): Promise<void> {
@@ -100,6 +150,7 @@ const SEED_NIGHTS: ObsNight[] = [
   { id: 'night-003', date: '2025-10-13', siteName: '兴隆观测站', siteLat: 40.3958, siteLng: 117.5772, moonPhasePct: 35, moonrise: '10:32', moonset: '20:18', sunset: '17:39', sunrise: '05:28', cloudText: '多云', primary: false, backup: true, dutyOfficer: '沈知远', remark: '备用观测夜' },
   { id: 'night-004', date: '2025-10-14', siteName: '兴隆观测站', siteLat: 40.3958, siteLng: 117.5772, moonPhasePct: 45, moonrise: '11:30', moonset: '21:00', sunset: '17:38', sunrise: '05:29', cloudText: '晴', primary: false, backup: true, dutyOfficer: '沈知远', remark: '备用观测夜' },
   { id: 'night-005', date: '2025-10-15', siteName: '兴隆观测站', siteLat: 40.3958, siteLng: 117.5772, moonPhasePct: 55, moonrise: '12:28', moonset: '21:46', sunset: '17:36', sunrise: '05:30', cloudText: '有雨', primary: false, backup: true, dutyOfficer: '苏晚', remark: '预报有雨，预留备用' },
+  { id: 'night-006', date: '2025-10-16', siteName: '兴隆观测站', siteLat: 40.3958, siteLng: 117.5772, moonPhasePct: 64, moonrise: '13:25', moonset: '22:30', sunset: '17:35', sunrise: '05:31', cloudText: '晴间多云', primary: false, backup: true, dutyOfficer: '苏晚', remark: '云量多变，整夜文字拆不出小时，待人工确认分时' },
 ];
 
 const SEED_TELESCOPES: Telescope[] = [
@@ -134,16 +185,27 @@ const SEED_SESSIONS: ObsSession[] = [
   { id: 's-14', nightId: 'night-002', targetId: 'target-001', startTime: '02:10', endTime: '03:10', telescopeId: 'tel-001', instrumentId: 'ins-002', filterSlot: 'L', plannedFrames: 30, status: '待执行', schemaVersion: SCHEMA_VERSION },
 ];
 
+/** 由整夜云量文字回填的分时预报（可拆的夜）与待人工确认记录（拆不出小时的夜） */
+const seedNow = new Date().toISOString();
+const SEED_FORECASTS: HourlyForecast[] = SEED_NIGHTS.filter((night) => parseCloudText(night.cloudText) !== null).flatMap((night) =>
+  forecastsFromLegacy(night.id, night.siteName, night.cloudText, seedNow, SCHEMA_VERSION),
+);
+const SEED_REVIEWS: LegacyReview[] = SEED_NIGHTS.map((night) => reviewFromLegacy(night.id, night.siteName, night.cloudText, SCHEMA_VERSION)).filter(
+  (item): item is LegacyReview => item !== null,
+);
+
 /** 首次打开（表内无数据）时写入示例数据 */
 export async function seedIfEmpty(): Promise<void> {
   const flag = await db.meta.get('seeded');
   if (flag) return;
-  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount] = await Promise.all([
+  const [targetCount, sessionCount, telescopeCount, instrumentCount, nightCount, forecastCount, reviewCount] = await Promise.all([
     db.targets.count(),
     db.sessions.count(),
     db.telescopes.count(),
     db.instruments.count(),
     db.nights.count(),
+    db.hourlyForecasts.count(),
+    db.legacyReviews.count(),
   ]);
   // Dexie 的 transaction 最多接受 5 张表 + 作用域，因此 meta 标记在事务外写入
   await db.transaction('rw', db.targets, db.sessions, db.telescopes, db.instruments, db.nights, async () => {
@@ -153,22 +215,27 @@ export async function seedIfEmpty(): Promise<void> {
     if (instrumentCount === 0) await db.instruments.bulkPut(SEED_INSTRUMENTS);
     if (sessionCount === 0) await db.sessions.bulkPut(SEED_SESSIONS);
   });
+  // 气象预报与待人工确认记录在事务外写入（表数量已超 Dexie 单事务上限）
+  if (forecastCount === 0 && SEED_FORECASTS.length > 0) await db.hourlyForecasts.bulkPut(SEED_FORECASTS);
+  if (reviewCount === 0 && SEED_REVIEWS.length > 0) await db.legacyReviews.bulkPut(SEED_REVIEWS);
   await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
 }
 
 /** 把 Dexie 数据同步到各 Zustand store（动态 import 规避模块循环依赖） */
 export async function hydrateAllStores(): Promise<void> {
-  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }] = await Promise.all([
+  const [{ useTargetStore }, { useSessionStore }, { useEquipmentStore }, { useNightStore }, { useWeatherStore }] = await Promise.all([
     import('../stores/targetStore'),
     import('../stores/sessionStore'),
     import('../stores/equipmentStore'),
     import('../stores/nightStore'),
+    import('../stores/weatherStore'),
   ]);
   await Promise.all([
     useTargetStore.getState().hydrate(),
     useSessionStore.getState().hydrate(),
     useEquipmentStore.getState().hydrate(),
     useNightStore.getState().hydrate(),
+    useWeatherStore.getState().hydrate(),
   ]);
 }
 

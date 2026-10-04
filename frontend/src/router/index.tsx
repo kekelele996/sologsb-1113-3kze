@@ -5,6 +5,7 @@ import OverviewPage from '../pages/OverviewPage';
 import TargetsPage from '../pages/TargetsPage';
 import SessionsPage from '../pages/SessionsPage';
 import EquipmentPage from '../pages/EquipmentPage';
+import WeatherPage from '../pages/WeatherPage';
 import ExportPage from '../pages/ExportPage';
 
 function NotFound() {
@@ -33,6 +34,7 @@ export const routes: RouteObject[] = [
       { path: 'targets', element: <TargetsPage /> },
       { path: 'sessions', element: <SessionsPage /> },
       { path: 'equipment', element: <EquipmentPage /> },
+      { path: 'weather', element: <WeatherPage /> },
       { path: 'export', element: <ExportPage /> },
       { path: '*', element: <NotFound /> },
     ],
